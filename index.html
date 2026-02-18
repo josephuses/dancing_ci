@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Confidence Interval Simulator</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f6f8; color: #333; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h1 { color: #2c3e50; }
+        .container { max-width: 900px; width: 100%; display: grid; grid-template-columns: 250px 1fr; gap: 20px; }
+        
+        /* Controls */
+        .controls { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); height: fit-content; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; font-weight: 600; margin-bottom: 5px; color: #555; }
+        select, input, button { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { background: #3498db; color: white; font-weight: bold; border: none; cursor: pointer; margin-top: 10px; transition: 0.2s; }
+        button:hover { background: #2980b9; }
+        button.reset { background: #95a5a6; margin-top: 5px; }
+        button.reset:hover { background: #7f8c8d; }
+
+        /* Stats Board */
+        .stats-board { margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.9em; }
+        .stat-val { font-weight: bold; }
+        .success { color: #27ae60; }
+        .fail { color: #c0392b; }
+
+        /* Viz */
+        .viz-panel { background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); padding: 10px; min-height: 500px; position: relative; }
+
+        /* D3 Elements */
+        .true-mean-line { stroke: #2c3e50; stroke-width: 2; stroke-dasharray: 5,5; }
+        .ci-line { stroke-width: 2; opacity: 0.8; }
+        .ci-dot { fill: #333; r: 3; }
+        .axis text { fill: #999; font-size: 11px; }
+        .domain, .tick line { stroke: #eee; }
+
+        .annotation { font-size: 12px; fill: #2c3e50; font-weight: bold; text-anchor: middle; background: white;}
+    </style>
+</head>
+<body>
+
+    <h1>Confidence Interval "Coverage"</h1>
+
+    <div class="container">
+        <div class="controls">
+            <div class="control-group">
+                <label>Confidence Level</label>
+                <select id="confLevel">
+                    <option value="1.645">90%</option>
+                    <option value="1.96" selected>95%</option>
+                    <option value="2.576">99%</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Sample Size (\(n\))</label>
+                <input type="range" id="sampleSize" min="5" max="100" value="30" step="5">
+                <div style="text-align:right; font-size:0.9em; color:#777;" id="nVal">n = 30</div>
+            </div>
+
+            <button onclick="addSamples()">Sample +25 Intervals</button>
+            <button class="reset" onclick="resetSim()">Reset</button>
+
+            <div class="stats-board">
+                <div class="stat-row">
+                    <span>Total Intervals:</span>
+                    <span class="stat-val" id="totalCount">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="success">Captured (Green):</span>
+                    <span class="stat-val success" id="hitCount">0</span>
+                </div>
+                <div class="stat-row">
+                    <span class="fail">Missed (Red):</span>
+                    <span class="stat-val fail" id="missCount">0</span>
+                </div>
+                <div class="stat-row" style="margin-top:10px; font-size:1.1em; border-top:1px solid #eee; padding-top:5px;">
+                    <span>Run Rate:</span>
+                    <span class="stat-val" id="runRate">--%</span>
+                </div>
+            </div>
+            
+            <p style="font-size: 0.85em; color: #666; margin-top: 15px; line-height: 1.4;">
+                <strong>Concept:</strong> The "True Mean" (dashed line) is fixed. Each time you sample, you cast a net. <br><br>
+                Notice that about 5% of the nets (at 95% confidence) simply miss the fish entirely. This is the risk of random sampling.
+            </p>
+        </div>
+
+        <div class="viz-panel" id="viz"></div>
+    </div>
+
+<script>
+    // Config
+    const margin = {top: 40, right: 20, bottom: 30, left: 40};
+    const width = 600 - margin.left - margin.right;
+    const height = 500 - margin.top - margin.bottom;
+
+    // State
+    let intervals = [];
+    const trueMean = 100;
+    const popStdDev = 15;
+    
+    // Setup SVG
+    const svg = d3.select("#viz").append("svg")
+        .attr("viewBox", `0 0 600 500`)
+        .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+
+    // Scales
+    const x = d3.scaleLinear().domain([70, 130]).range([0, width]);
+    const y = d3.scaleLinear().domain([0, 100]).range([0, height]); // Will scroll
+
+    // Axes
+    const xAxis = svg.append("g")
+        .attr("transform", `translate(0, -10)`) // Axis at top
+        .call(d3.axisTop(x));
+
+    // True Mean Line
+    const meanLine = svg.append("line")
+        .attr("class", "true-mean-line")
+        .attr("x1", x(trueMean)).attr("x2", x(trueMean))
+        .attr("y1", 0).attr("y2", height);
+
+    svg.append("text")
+        .attr("class", "annotation")
+        .attr("x", x(trueMean))
+        .attr("y", -25)
+        .text("True Population Mean (μ)");
+
+    // Group for intervals
+    const gIntervals = svg.append("g");
+
+    // Helper: Random Normal Box-Muller
+    function randn_bm() {
+        let u = 0, v = 0;
+        while(u === 0) u = Math.random(); 
+        while(v === 0) v = Math.random();
+        return Math.sqrt( -2.0 * Math.log( u ) ) * Math.cos( 2.0 * Math.PI * v );
+    }
+
+    // Helper: Generate a Sample Mean
+    function getSampleMean(n) {
+        let sum = 0;
+        for(let i=0; i<n; i++) {
+            sum += (trueMean + randn_bm() * popStdDev);
+        }
+        return sum / n;
+    }
+
+    function addSamples() {
+        const n = parseInt(document.getElementById('sampleSize').value);
+        const zCrit = parseFloat(document.getElementById('confLevel').value);
+        
+        // Standard Error = sigma / sqrt(n)
+        // Note: For simulation we use known sigma (Z-interval) to keep it pure 
+        // regarding the coverage concept, but similar logic applies to t-intervals.
+        const se = popStdDev / Math.sqrt(n);
+        const marginOfError = zCrit * se;
+
+        // Generate 25 new intervals
+        for(let i=0; i<25; i++) {
+            const mean = getSampleMean(n);
+            const lower = mean - marginOfError;
+            const upper = mean + marginOfError;
+            const hit = (lower <= trueMean && upper >= trueMean);
+            
+            intervals.unshift({ mean, lower, upper, hit, id: Date.now() + i });
+        }
+
+        // Keep only last 50 for visuals to prevent overcrowding
+        if(intervals.length > 50) intervals = intervals.slice(0, 50);
+
+        updateViz();
+        updateStats();
+    }
+
+    function updateViz() {
+        // Bind data
+        const rows = gIntervals.selectAll(".interval-group")
+            .data(intervals, d => d.id);
+
+        // Enter
+        const enter = rows.enter().append("g")
+            .attr("class", "interval-group")
+            .attr("transform", (d, i) => `translate(0, ${y(i+1)})`);
+        
+        enter.append("line")
+            .attr("class", "ci-line")
+            .attr("x1", x(trueMean)).attr("x2", x(trueMean)) // Start at center for animation
+            .attr("y1", 0).attr("y2", 0)
+            .transition().duration(500)
+            .attr("x1", d => x(d.lower))
+            .attr("x2", d => x(d.upper))
+            .attr("stroke", d => d.hit ? "#27ae60" : "#c0392b"); // Green or Red
+
+        enter.append("circle")
+            .attr("class", "ci-dot")
+            .attr("cx", x(trueMean))
+            .attr("cy", 0)
+            .transition().duration(500)
+            .attr("cx", d => x(d.mean));
+
+        // Update positions of existing
+        rows.transition().duration(500)
+            .attr("transform", (d, i) => `translate(0, ${y(i+1)})`);
+
+        // Exit
+        rows.exit().remove();
+    }
+
+    // Running totals (lifetime of session)
+    let total = 0;
+    let hits = 0;
+
+    function updateStats() {
+        // Count the newly added batch (we only animate 50, but we track stats for all generated in this click)
+        // To simplify, let's just track the 'intervals' array actually displayed? 
+        // No, typically users want to see "Long Run" probability.
+        // Let's count the 25 we just added.
+        
+        // Actually, simpler logic:
+        // We added 25 to the array (before slicing).
+        // Let's just increment the global counters inside the addSamples loop.
+    }
+    
+    // Override addSamples to handle counting properly
+    const oldAddSamples = addSamples;
+    addSamples = function() {
+        const n = parseInt(document.getElementById('sampleSize').value);
+        const zCrit = parseFloat(document.getElementById('confLevel').value);
+        const se = popStdDev / Math.sqrt(n);
+        const marginOfError = zCrit * se;
+
+        let batchHits = 0;
+        const batchSize = 25;
+
+        for(let i=0; i<batchSize; i++) {
+            const mean = getSampleMean(n);
+            const lower = mean - marginOfError;
+            const upper = mean + marginOfError;
+            const hit = (lower <= trueMean && upper >= trueMean);
+            
+            if(hit) batchHits++;
+            
+            // Add to visual array
+            intervals.unshift({ mean, lower, upper, hit, id: Date.now() + i });
+        }
+        
+        // Update Globals
+        total += batchSize;
+        hits += batchHits;
+
+        if(intervals.length > 50) intervals = intervals.slice(0, 50);
+
+        updateViz();
+        
+        // DOM Updates
+        document.getElementById('totalCount').innerText = total;
+        document.getElementById('hitCount').innerText = hits;
+        document.getElementById('missCount').innerText = (total - hits);
+        document.getElementById('runRate').innerText = ((hits/total)*100).toFixed(1) + "%";
+    }
+
+    function resetSim() {
+        intervals = [];
+        total = 0;
+        hits = 0;
+        updateViz();
+        document.getElementById('totalCount').innerText = 0;
+        document.getElementById('hitCount').innerText = 0;
+        document.getElementById('missCount').innerText = 0;
+        document.getElementById('runRate').innerText = "--%";
+    }
+
+    // Slider listener
+    document.getElementById('sampleSize').addEventListener('input', function(e) {
+        document.getElementById('nVal').innerText = "n = " + e.target.value;
+    });
+
+</script>
+
+</body>
+</html>
